@@ -1,0 +1,222 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: 'true'
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'ubuntu-latest' && '-C link-arg=-fuse-ld=mold' || '' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          cache-targets: false
+          workspaces: |
+            .
+            editors/zed
+      - name: Install Linux test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libluajit-5.1-2 mold
+      - name: Unit tests (both platforms)
+        run: cargo test --locked --workspace --lib --bins
+      - name: LuaJIT, CLI and DAP integration tests
+        if: runner.os == 'Linux'
+        run: cargo test --locked --workspace
+      - name: Zed unit-test target
+        run: cargo test --locked --manifest-path editors/zed/Cargo.toml --lib
+      - name: Check VS Code JavaScript
+        run: node --check editors/vscode/extension.js
+
+  native:
+    name: Build (${{ matrix.bundle }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            platform: linux
+            bundle: gdebug-linux-x86
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux64
+            bundle: gdebug-linux-x64
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            platform: win32
+            bundle: gdebug-windows-x86
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win64
+            bundle: gdebug-windows-x64
+    env:
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+      BUNDLE: ${{ matrix.bundle }}
+      # Zig owns Linux linking; MSVC uses a static CRT for standalone downloads.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          cache-targets: false
+      - uses: mlugg/setup-zig@v2.2.1
+        if: runner.os == 'Linux'
+        with:
+          version: '0.16.0'
+          cache-key: ${{ matrix.target }}
+      - name: Install glibc-compatible cross linker
+        if: runner.os == 'Linux'
+        run: cargo install --locked cargo-zigbuild --version 0.24.1
+      - name: Build CLI and both module realms
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            build=(cargo zigbuild --locked --release --target "$TARGET.2.17")
+            library=libgdebug.so
+            executable=gdebug
+          else
+            build=(cargo build --locked --release --target "$TARGET")
+            library=gdebug.dll
+            executable=gdebug.exe
+          fi
+          mkdir -p stage/garrysmod/lua/bin dist
+          "${build[@]}" -p gdebug-cli
+          cp "target/$TARGET/release/$executable" stage/
+          # Copy each realm before the next build overwrites the same library path.
+          "${build[@]}" -p gdebug-module --no-default-features --features server
+          cp "target/$TARGET/release/$library" "stage/garrysmod/lua/bin/gmsv_gdebug_$PLATFORM.dll"
+          "${build[@]}" -p gdebug-module --no-default-features --features client
+          cp "target/$TARGET/release/$library" "stage/garrysmod/lua/bin/gmcl_gdebug_$PLATFORM.dll"
+          test -s "stage/$executable"
+          test -s "stage/garrysmod/lua/bin/gmsv_gdebug_$PLATFORM.dll"
+          test -s "stage/garrysmod/lua/bin/gmcl_gdebug_$PLATFORM.dll"
+      - name: Package Linux (preserve executable permissions)
+        if: runner.os == 'Linux'
+        run: tar -czf "dist/$BUNDLE.tar.gz" -C stage .
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath "dist/$env:BUNDLE.zip"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          path: dist/*
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+  editors:
+    name: Build editor extensions
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Native linker flags must not reach the WASM linker.
+      RUSTFLAGS: ''
+      VSCE_VERSION: '4.1.0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: editors/zed
+          cache-targets: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 'lts/*'
+          package-manager-cache: false
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-vsce-${{ runner.os }}-${{ env.VSCE_VERSION }}
+      - name: Package VS Code
+        working-directory: editors/vscode
+        run: |
+          mkdir -p ../../dist
+          npx --yes --package="@vscode/vsce@$VSCE_VERSION" vsce package \
+            --no-dependencies --allow-missing-repository --skip-license \
+            --out ../../dist/gdebug-vscode.vsix
+          unzip -p ../../dist/gdebug-vscode.vsix extension/extension.js | cmp - extension.js
+      - name: Build Zed WASM component
+        run: cargo build --locked --release --manifest-path editors/zed/Cargo.toml --target wasm32-wasip2
+      - name: Package Zed
+        run: |
+          mkdir -p stage/zed
+          cp editors/zed/target/wasm32-wasip2/release/zed_gdebug.wasm stage/zed/extension.wasm
+          cp -r editors/zed/debug_adapter_schemas stage/zed/
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path('editors/zed')
+          lock = tomllib.loads((root / 'Cargo.lock').read_text())
+          versions = [p['version'] for p in lock['package'] if p['name'] == 'zed_extension_api']
+          assert len(versions) == 1, versions
+          # Zed's builder normally adds this metadata to the distributed manifest.
+          manifest = (root / 'extension.toml').read_text()
+          manifest += f'\n[lib]\nkind = "Rust"\nversion = "{versions[0]}"\n'
+          assert tomllib.loads(manifest)['lib']['version'] == versions[0]
+          pathlib.Path('stage/zed/extension.toml').write_text(manifest)
+          assert pathlib.Path('stage/zed/extension.wasm').read_bytes()[:8] == b'\0asm\x0d\0\x01\0'
+          PY
+          tar -czf dist/gdebug-zed.tar.gz -C stage/zed .
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          path: dist/gdebug-vscode.vsix
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          path: dist/gdebug-zed.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 30

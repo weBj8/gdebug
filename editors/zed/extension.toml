@@ -1,0 +1,10 @@
+id = "gdebug"
+name = "GDebug"
+version = "0.1.0"
+schema_version = 1
+authors = ["gdebug contributors"]
+description = "Attach debugger for Garry's Mod Lua (requires the gdebug CLI and native module)"
+repository = "https://github.com/weBj8/gdebug"
+
+[debug_adapters.GDebug]
+schema_path = "debug_adapter_schemas/GDebug.json"

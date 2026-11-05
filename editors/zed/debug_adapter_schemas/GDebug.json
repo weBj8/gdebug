@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "required": ["endpointFile", "allowHookReplacement"],
+  "properties": {
+    "request": { "type": "string", "enum": ["attach"], "default": "attach" },
+    "endpointFile": { "type": "string", "description": "Path to the private endpoint descriptor written by the gdebug module (GDEBUG_SERVER_ENDPOINT_FILE / GDEBUG_CLIENT_ENDPOINT_FILE). Contains a secret token: keep it owner-only." },
+    "endpoint": { "type": "string", "description": "Optional loopback host:port override, e.g. the local end of an SSH forward. The token still comes from endpointFile." },
+    "realm": { "type": "string", "enum": ["server", "client"], "description": "Asserts the target realm; attach fails if the endpoint is the other realm." },
+    "allowHookReplacement": { "type": "boolean", "const": true, "description": "Required consent: attaching replaces the target's Lua debug hook (GMod's infinite-loop watchdog and profilers stop while attached). Restored on detach." },
+    "stopOnAttach": { "type": "boolean", "default": false },
+    "sourceMaps": {
+      "type": "array",
+      "description": "Explicit local/remote source roots; longest prefix wins. Without a match, paths under lua/ or gamemodes/ map by GMod's virtual root.",
+      "items": {
+        "type": "object",
+        "required": ["localRoot", "remoteRoot"],
+        "properties": { "localRoot": { "type": "string" }, "remoteRoot": { "type": "string" } }
+      }
+    }
+  }
+}
