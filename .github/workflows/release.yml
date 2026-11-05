@@ -29,6 +29,7 @@ jobs:
           pattern: gdebug-*
           path: dist
           merge-multiple: true
+          skip-decompress: true
       - name: Verify complete artifact set and checksum downloads
         working-directory: dist
         shell: bash
